@@ -18,6 +18,8 @@ PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "")
 VIEWPORT_W = int(os.getenv("VIEWPORT_W", "1280"))
 VIEWPORT_H = int(os.getenv("VIEWPORT_H", "900"))
+MOBILE_VIEWPORT_W = int(os.getenv("MOBILE_VIEWPORT_W", "390"))
+MOBILE_VIEWPORT_H = int(os.getenv("MOBILE_VIEWPORT_H", "844"))
 
 sessions: Dict[str, Dict[str, Any]] = {}
 locks: Dict[str, asyncio.Lock] = {}
@@ -60,7 +62,7 @@ async def cookies_logged_in(context: BrowserContext) -> bool:
         return False
 
 
-async def open_interactive_session(client_id: str):
+async def open_interactive_session(client_id: str, mobile: bool = False):
     client_id = valid_client_id(client_id)
     existing = sessions.get(client_id)
     if existing:
@@ -72,17 +74,27 @@ async def open_interactive_session(client_id: str):
         await close_session(client_id)
 
     pw = await async_playwright().start()
-    ctx = await pw.chromium.launch_persistent_context(
+    width = MOBILE_VIEWPORT_W if mobile else VIEWPORT_W
+    height = MOBILE_VIEWPORT_H if mobile else VIEWPORT_H
+    launch_kwargs = dict(
         user_data_dir=str(profile_dir(client_id)),
         headless=True,
-        viewport={"width": VIEWPORT_W, "height": VIEWPORT_H},
+        viewport={"width": width, "height": height},
         locale="ko-KR",
         args=["--no-sandbox", "--disable-dev-shm-usage"],
     )
+    if mobile:
+        launch_kwargs.update({
+            "is_mobile": True,
+            "has_touch": True,
+            "device_scale_factor": 2,
+            "user_agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        })
+    ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
     await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(2500)
-    obj = {"pw": pw, "context": ctx, "page": page}
+    obj = {"pw": pw, "context": ctx, "page": page, "width": width, "height": height, "mobile": mobile}
     sessions[client_id] = obj
     return obj
 
@@ -160,11 +172,12 @@ async def login_page(client_id: str, sig: str = "", return_to: str = ""):
     safe_sig = html.escape(sig, quote=True)
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Instagram 로그인</title><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
-.card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px}} .muted{{color:#666;line-height:1.55}}
-.browser{{position:relative;display:inline-block;width:100%;max-width:{VIEWPORT_W}px}} #shot{{width:100%;border:1px solid #bbb;border-radius:12px;display:block;cursor:default;background:#eee;outline:none}}
-#kbd{{position:fixed;left:-10000px;top:0;width:2px;height:2px;opacity:.01}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
+*{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111;overflow-x:hidden}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
+.card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px;font-size:26px}} .muted{{color:#666;line-height:1.55}}
+.browser{{position:relative;width:100%;display:flex;justify-content:center;overflow:hidden}} #shot{{width:100%;height:auto;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:pointer;background:#eee;outline:none;touch-action:manipulation}}
+#kbd{{position:fixed;left:-10000px;top:0;width:2px;height:2px;opacity:.01}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
 .tip{{background:#f2f6ff;border:1px solid #dbe6ff;border-radius:12px;padding:11px 13px;margin:10px 0 14px;line-height:1.5}}
+@media(max-width:640px){{body{{background:#fff}} .wrap{{margin:0;padding:0}} .card{{border:0;border-radius:0;box-shadow:none;padding:12px 10px;min-height:100vh}} h1{{font-size:21px;margin-top:2px}} .muted{{font-size:13px;margin:5px 0}} .tip{{font-size:13px;margin:8px 0 10px;padding:9px 10px}} #state{{font-size:13px;margin:7px 0}} .browser{{margin:0 auto;width:100%;max-width:430px;background:#f4f4f4;border-radius:12px}} #shot{{max-width:100%;border-radius:12px;border-color:#ddd}} .controls{{position:sticky;bottom:0;z-index:20;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);padding:10px 0 max(10px,env(safe-area-inset-bottom));margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}} .controls button,.controls a.btn{{width:100%;min-height:48px;font-size:14px;padding:9px 6px;display:flex;align-items:center;justify-content:center}} #done,#back{{grid-column:span 3}} }}
 </style></head><body><div class="wrap"><div class="card"><h1>Instagram 로그인</h1>
 <p class="muted">아래는 서버에서 실행 중인 전용 Instagram 브라우저입니다. 로그인 정보는 Vercel로 전달되지 않고 이 브라우저 세션에만 사용됩니다.</p>
 <div class="tip"><b>Instagram 화면의 입력칸을 직접 클릭한 뒤 그냥 키보드로 입력하세요.</b> 아이디/비밀번호 붙여넣기도 되고, Enter·Tab·Backspace도 바로 동작합니다.</div>
@@ -173,13 +186,14 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 </div></div><script>
 const CLIENT={safe_client!r}, SIG={safe_sig!r};
 const shot=document.getElementById('shot'), state=document.getElementById('state'), kbd=document.getElementById('kbd');
-let composing=false, refreshing=false;
+const MOBILE=window.matchMedia('(max-width: 640px)').matches || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+let composing=false, refreshing=false, remoteW=MOBILE?{MOBILE_VIEWPORT_W}:{VIEWPORT_W}, remoteH=MOBILE?{MOBILE_VIEWPORT_H}:{VIEWPORT_H};
 async function post(path,body={{}}){{const r=await fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json().catch(()=>({{}}));if(!r.ok)throw new Error(d.detail||'요청 실패');return d}}
 async function sendText(text){{if(!text)return;await post(`/session/${{CLIENT}}/type?sig=${{encodeURIComponent(SIG)}}`,{{text}})}}
 async function sendKey(key){{await post(`/session/${{CLIENT}}/key?sig=${{encodeURIComponent(SIG)}}`,{{key}})}}
-async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}`);await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
-async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());state.textContent=s.logged_in?'✅ Instagram 로그인됨':'Instagram 로그인 진행 중 · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,700)}}}}
-shot.addEventListener('click',async e=>{{const r=shot.getBoundingClientRect();const x=(e.clientX-r.left)*{VIEWPORT_W}/r.width;const y=(e.clientY-r.top)*{VIEWPORT_H}/r.height;try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}});kbd.focus({{preventScroll:true}})}}catch(err){{alert(err.message)}}}});
+async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}&mobile=${{MOBILE?'1':'0'}}`);await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
+async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());remoteW=s.width||remoteW;remoteH=s.height||remoteH;state.textContent=s.logged_in?'✅ Instagram 로그인됨':(s.mobile?'📱 모바일 Instagram 로그인 진행 중':'Instagram 로그인 진행 중')+' · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,700)}}}}
+shot.addEventListener('click',async e=>{{const r=shot.getBoundingClientRect();const x=(e.clientX-r.left)*remoteW/r.width;const y=(e.clientY-r.top)*remoteH/r.height;try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}});kbd.focus({{preventScroll:true}})}}catch(err){{alert(err.message)}}}});
 kbd.addEventListener('compositionstart',()=>{{composing=true}});
 kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
 kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
@@ -195,10 +209,10 @@ def check_login_sig(client_id: str, sig: str):
 
 
 @app.post("/session/{client_id}/start")
-async def session_start(client_id: str, sig: str = Query(default="")):
+async def session_start(client_id: str, sig: str = Query(default=""), mobile: int = Query(default=0)):
     check_login_sig(client_id, sig)
-    await open_interactive_session(client_id)
-    return {"ok": True}
+    obj = await open_interactive_session(client_id, mobile=bool(mobile))
+    return {"ok": True, "mobile": obj.get("mobile", False), "width": obj.get("width"), "height": obj.get("height")}
 
 
 @app.get("/session/{client_id}/screenshot")
@@ -213,7 +227,7 @@ async def screenshot(client_id: str, sig: str = Query(default="")):
 async def session_status(client_id: str, sig: str = Query(default="")):
     check_login_sig(client_id, sig)
     obj = await open_interactive_session(client_id)
-    return {"logged_in": await cookies_logged_in(obj["context"]), "url": obj["page"].url}
+    return {"logged_in": await cookies_logged_in(obj["context"]), "url": obj["page"].url, "mobile": obj.get("mobile", False), "width": obj.get("width"), "height": obj.get("height")}
 
 
 @app.post("/session/{client_id}/click")
