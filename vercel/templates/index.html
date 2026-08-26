@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Instagram Comment Analyzer</title>
+  <link rel="stylesheet" href="/api/static/style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">INSTAGRAM COMMENT ANALYZER</p>
+        <h1>인스타 댓글을 한 번에<br/>수집하고 분석하세요.</h1>
+        <p class="sub">게시글 링크 하나로 댓글 수집 → 긍부정 → 유형 → 구매의향 → Google Sheets 저장</p>
+      </div>
+      <button class="login-link" id="instagramLogin" type="button">Instagram 로그인</button>
+    </section>
+
+    <section class="connection-panel panel">
+      <div class="connection-head">
+        <div>
+          <p class="progress-kicker">연결 상태</p>
+          <h3>분석 환경</h3>
+        </div>
+        <button id="refreshConnections" class="ghost-button" type="button">상태 새로고침</button>
+      </div>
+      <div class="connection-grid">
+        <div class="connection-item">
+          <span id="igDot" class="status-dot pending"></span>
+          <div><b>Instagram</b><small id="igStatus">확인 중…</small><small id="igDetail"></small></div>
+        </div>
+        <div class="connection-item">
+          <span id="aiDot" class="status-dot pending"></span>
+          <div><b>OpenAI API</b><small id="aiStatus">확인 중…</small><small id="aiDetail"></small></div>
+        </div>
+        <div class="connection-item">
+          <span id="sheetDot" class="status-dot pending"></span>
+          <div><b>Google Sheets</b><small id="sheetStatus">확인 중…</small><small id="sheetDetail"></small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel analyze-panel">
+      <label for="url">Instagram 게시글 또는 Reel URL</label>
+      <div class="input-row">
+        <input id="url" placeholder="https://www.instagram.com/p/.../" />
+        <button id="run">댓글 분석 시작</button>
+      </div>
+      <div class="options">
+        <label><input type="checkbox" id="ai" checked /> AI 분석</label>
+        <label><input type="checkbox" id="sheet" checked /> Google Sheets 저장</label>
+      </div>
+      <div id="status" class="status">대기 중</div>
+    </section>
+
+    <section id="progressPanel" class="panel progress-panel hidden">
+      <div class="progress-head">
+        <div>
+          <p class="progress-kicker">현재 작업</p>
+          <h3 id="stage">대기</h3>
+          <p id="message" class="progress-message">작업을 기다리고 있습니다.</p>
+        </div>
+        <strong id="percent" class="percent">0%</strong>
+      </div>
+      <div class="bar"><div id="barFill" class="bar-fill"></div></div>
+      <div class="progress-meta">
+        <span id="countText">-</span>
+        <span id="jobState">대기</span>
+      </div>
+      <details class="log-box" open>
+        <summary>실시간 작업 로그</summary>
+        <pre id="logs">아직 로그가 없습니다.</pre>
+      </details>
+      <div id="errorBox" class="error-box hidden"></div>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="cards">
+        <div class="card"><span>총 댓글</span><strong id="total">0</strong></div>
+        <div class="card"><span>긍정</span><strong id="pos">0</strong></div>
+        <div class="card"><span>중립</span><strong id="neu">0</strong></div>
+        <div class="card"><span>부정</span><strong id="neg">0</strong></div>
+      </div>
+
+      <div class="grid2">
+        <div class="panel small">
+          <h3>댓글 유형</h3>
+          <div id="types" class="list"></div>
+        </div>
+        <div class="panel small">
+          <h3>구매의향</h3>
+          <div id="intent" class="list"></div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <h2>댓글 전체</h2>
+        <a id="download" class="download" href="#">CSV 다운로드</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>작성자</th><th>댓글</th><th>작성 시점</th><th>좋아요</th><th>긍부정</th><th>유형</th><th>키워드</th><th>구매의향</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+<script>
+const $ = (id) => document.getElementById(id);
+const runBtn = $('run');
+const statusEl = $('status');
+let pollTimer = null;
+const CLIENT_ID_KEY = 'ig_comment_client_id';
+function getClientId(){
+  let id = localStorage.getItem(CLIENT_ID_KEY);
+  if(!id){ id = 'u_' + crypto.randomUUID().replaceAll('-', ''); localStorage.setItem(CLIENT_ID_KEY,id); }
+  return id;
+}
+
+
+async function loadSystemStatus() {
+  const ids = ['ig', 'ai', 'sheet'];
+  ids.forEach(x => {
+    $(`${x}Dot`).className = 'status-dot pending';
+    $(`${x}Status`).textContent = '확인 중…';
+  });
+  try {
+    const res = await fetch('/api/system-status');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '연결 상태 확인 실패');
+    renderConnection('ig', data.instagram);
+    renderConnection('ai', data.openai);
+    renderConnection('sheet', data.sheets);
+    if (data.instagram && data.instagram.ok) await loadInstagramLoginStatus();
+  } catch (err) {
+    ids.forEach(x => {
+      $(`${x}Dot`).className = 'status-dot bad';
+      $(`${x}Status`).textContent = '확인 실패';
+      $(`${x}Detail`).textContent = err.message;
+    });
+  }
+}
+
+function renderConnection(prefix, info) {
+  $(`${prefix}Dot`).className = `status-dot ${info.ok ? 'good' : 'bad'}`;
+  $(`${prefix}Status`).textContent = info.label || (info.ok ? '연결됨' : '미연결');
+  $(`${prefix}Detail`).textContent = info.detail || '';
+}
+
+async function loadInstagramLoginStatus(){
+  try {
+    const res = await fetch(`/api/instagram-status?client_id=${encodeURIComponent(getClientId())}`);
+    const data = await res.json();
+    $('igDot').className = `status-dot ${data.logged_in ? 'good' : 'bad'}`;
+    $('igStatus').textContent = data.label || (data.logged_in ? '로그인됨' : '로그인 필요');
+    $('igDetail').textContent = data.detail || '각 사용자별 원격 브라우저 로그인 세션';
+  } catch(e){
+    $('igDot').className = 'status-dot bad';
+    $('igStatus').textContent = '확인 실패';
+    $('igDetail').textContent = e.message;
+  }
+}
+
+$('instagramLogin').addEventListener('click', async () => {
+  try {
+    const returnTo = location.origin + '/';
+    const res = await fetch(`/api/instagram-login-url?client_id=${encodeURIComponent(getClientId())}&return_to=${encodeURIComponent(returnTo)}`);
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || '로그인 URL 생성 실패');
+    location.href = data.url;
+  } catch(e){ alert(e.message); }
+});
+
+$('refreshConnections').addEventListener('click', loadSystemStatus);
+loadSystemStatus();
+
+runBtn.addEventListener('click', async () => {
+  const url = $('url').value.trim();
+  if (!url) return alert('Instagram URL을 입력해 주세요.');
+
+  if (pollTimer) clearTimeout(pollTimer);
+  runBtn.disabled = true;
+  $('results').classList.add('hidden');
+  $('progressPanel').classList.remove('hidden');
+  $('errorBox').classList.add('hidden');
+  $('logs').textContent = '작업 생성 중…';
+  statusEl.textContent = '작업을 생성하고 있습니다.';
+
+  try {
+    const res = await fetch('/api/jobs', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        url,
+        client_id: getClientId(),
+        analyze_ai: $('ai').checked,
+        save_sheet: $('sheet').checked,
+        max_rounds: 120
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '작업 생성에 실패했습니다.');
+    await pollJob(data.job_id);
+  } catch (err) {
+    showFatal(err.message);
+    runBtn.disabled = false;
+  }
+});
+
+async function pollJob(jobId) {
+  try {
+    const res = await fetch(`/api/jobs/${jobId}`);
+    const job = await res.json();
+    if (!res.ok) throw new Error(job.detail || '작업 상태를 가져오지 못했습니다.');
+
+    renderProgress(job);
+
+    if (job.state === 'done') {
+      runBtn.disabled = false;
+      statusEl.textContent = job.message || '완료';
+      if (job.result) render(job.result);
+      loadSystemStatus();
+      return;
+    }
+    if (job.state === 'error') {
+      runBtn.disabled = false;
+      const msg = job.error || job.message || '알 수 없는 오류';
+      $('errorBox').textContent = `오류 발생 단계: ${job.stage}\n${msg}`;
+      $('errorBox').classList.remove('hidden');
+      statusEl.textContent = `오류 · ${job.stage}`;
+      return;
+    }
+
+    pollTimer = setTimeout(() => pollJob(jobId), 700);
+  } catch (err) {
+    showFatal(err.message);
+    runBtn.disabled = false;
+  }
+}
+
+function renderProgress(job) {
+  $('stage').textContent = job.stage || '-';
+  $('message').textContent = job.message || '-';
+  const pct = Number(job.progress || 0);
+  $('percent').textContent = `${pct}%`;
+  $('barFill').style.width = `${pct}%`;
+  $('jobState').textContent = stateLabel(job.state);
+  $('countText').textContent = job.total
+    ? `${job.current || 0} / ${job.total}`
+    : (job.current ? `현재 ${job.current}개` : '-');
+  $('logs').textContent = (job.logs && job.logs.length)
+    ? job.logs.join('\n')
+    : '아직 로그가 없습니다.';
+  $('logs').scrollTop = $('logs').scrollHeight;
+  statusEl.textContent = `${job.stage || '작업 중'} · ${job.message || ''}`;
+}
+
+function stateLabel(v) {
+  return ({queued:'대기', running:'진행 중', done:'완료', error:'오류'})[v] || v || '-';
+}
+
+function showFatal(message) {
+  $('progressPanel').classList.remove('hidden');
+  $('errorBox').textContent = message;
+  $('errorBox').classList.remove('hidden');
+  statusEl.textContent = '오류: ' + message;
+}
+
+function render(data) {
+  const s = data.summary;
+  $('total').textContent = s.total;
+  $('pos').textContent = s.sentiments['긍정'] || 0;
+  $('neu').textContent = s.sentiments['중립'] || 0;
+  $('neg').textContent = s.sentiments['부정'] || 0;
+
+  $('types').innerHTML = Object.entries(s.types).map(([k,v]) => `<div><span>${esc(k)}</span><b>${v}</b></div>`).join('') || '<p>분석 데이터 없음</p>';
+  $('intent').innerHTML = Object.entries(s.purchase_intent).map(([k,v]) => `<div><span>${esc(k)}</span><b>${v}</b></div>`).join('');
+
+  $('tbody').innerHTML = data.comments.map(c => `
+    <tr>
+      <td>${esc(c.username)}</td>
+      <td class="comment">${esc(c.comment)}</td>
+      <td>${esc(c.created_at || '-')}</td>
+      <td>${esc(c.likes || '-')}</td>
+      <td><span class="pill">${esc(c.sentiment || '-')}</span></td>
+      <td>${esc(c.comment_type || '-')}</td>
+      <td>${esc(c.keyword || '-')}</td>
+      <td>${esc(c.purchase_intent || '-')}</td>
+    </tr>`).join('');
+
+  $('download').href = data.download_url;
+  $('results').classList.remove('hidden');
+
+  if (data.sheet_error) {
+    $('errorBox').textContent = `댓글 분석은 완료됐지만 Google Sheets 저장 실패:\n${data.sheet_error}`;
+    $('errorBox').classList.remove('hidden');
+  }
+}
+
+function esc(v='') {
+  return String(v).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+</script>
+</body>
+</html>
