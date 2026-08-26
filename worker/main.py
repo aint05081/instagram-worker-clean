@@ -256,10 +256,8 @@ shot.addEventListener('pointerdown',e=>{{
   focusMobileKeyboard();
   void forwardPointer(e);
 }},{{passive:false}});
-shot.addEventListener('touchstart',e=>{{
-  e.preventDefault();
-  focusMobileKeyboard();
-}},{{passive:false}});
+// pointerdown above is the single source of truth. Keeping a second touchstart
+// handler can cause duplicate gesture/focus behavior on iOS WebKit.
 shot.addEventListener('mousedown',e=>{{if(MOBILE)e.preventDefault()}});
 shot.addEventListener('dragstart',e=>e.preventDefault());
 
@@ -297,7 +295,12 @@ def session_op_lock(client_id: str) -> asyncio.Lock:
 @app.post("/session/{client_id}/start")
 async def session_start(client_id: str, sig: str = Query(default=""), mobile: int = Query(default=0)):
     check_login_sig(client_id, sig)
-    obj = await open_interactive_session(client_id, mobile=bool(mobile))
+    # Creating a persistent Chromium profile must be serialized. On mobile the UI
+    # immediately starts screenshot/status polling; without this lock, two requests
+    # can race and try to open the same user_data_dir, causing a 500 profile-lock error.
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id, mobile=bool(mobile))
+        obj["last_used"] = time.monotonic()
     return {"ok": True, "mobile": obj.get("mobile", False), "width": obj.get("width"), "height": obj.get("height")}
 
 
@@ -451,43 +454,89 @@ async def find_comment_blocks(page: Page, shortcode: str) -> List[Dict[str, Any]
 @app.post("/scrape")
 async def scrape(req: ScrapeReq, x_worker_key: Optional[str] = Header(default=None), authorization: Optional[str] = Header(default=None)):
     require_key(x_worker_key, authorization)
-    client_id=valid_client_id(req.client_id); shortcode=extract_shortcode(req.url)
-    lock=locks.setdefault(client_id,asyncio.Lock())
-    async with lock:
-        # Reuse the browser that the user just logged into. This avoids a full Chromium restart.
+    client_id = valid_client_id(req.client_id)
+    shortcode = extract_shortcode(req.url)
+
+    # IMPORTANT: scrape must use the same operation lock as screenshot/status/click/type.
+    # Otherwise the remote-login page can still be polling while this request navigates
+    # the exact same Playwright Page, which intermittently produces a 500.
+    async with session_op_lock(client_id):
         interactive = sessions.get(client_id)
         temp_pw = None
         temp_ctx = None
-        if interactive and not interactive["page"].is_closed():
-            ctx = interactive["context"]
-            page = interactive["page"]
-            interactive["last_used"] = time.monotonic()
-        else:
-            temp_pw=await async_playwright().start()
-            temp_ctx=await temp_pw.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir(client_id)),headless=True,
-                viewport={"width":VIEWPORT_W,"height":VIEWPORT_H},locale="ko-KR",
-                args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"]
-            )
-            ctx=temp_ctx
-            page=ctx.pages[0] if ctx.pages else await ctx.new_page()
+        if interactive:
+            try:
+                if not interactive["page"].is_closed():
+                    ctx = interactive["context"]
+                    page = interactive["page"]
+                    interactive["last_used"] = time.monotonic()
+                else:
+                    interactive = None
+            except Exception:
+                interactive = None
+
+        if not interactive:
+            # Serialize opening the persistent profile too, so another endpoint cannot
+            # open the same user_data_dir at the same time.
+            temp_pw = await async_playwright().start()
+            try:
+                temp_ctx = await temp_pw.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir(client_id)),
+                    headless=True,
+                    viewport={"width": VIEWPORT_W, "height": VIEWPORT_H},
+                    locale="ko-KR",
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                )
+            except Exception as e:
+                try:
+                    await temp_pw.stop()
+                except Exception:
+                    pass
+                raise HTTPException(status_code=503, detail=f"Instagram 브라우저를 열지 못했습니다: {type(e).__name__}: {e}")
+            ctx = temp_ctx
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
         try:
             if not await cookies_logged_in(ctx):
-                raise HTTPException(status_code=401,detail="Instagram 로그인이 필요합니다. 사이트의 Instagram 로그인 버튼을 눌러 먼저 로그인해 주세요.")
-            await page.goto(req.url,wait_until='domcontentloaded',timeout=45000)
-            await page.wait_for_timeout(1200)
-            if '/accounts/login' in page.url:
-                raise HTTPException(status_code=401,detail="Instagram 로그인 세션이 만료되었습니다. 다시 로그인해 주세요.")
-            await click_more_comments(page,shortcode,req.max_rounds)
-            comments=await find_comment_blocks(page,shortcode)
-            return {"ok":True,"count":len(comments),"comments":comments}
+                raise HTTPException(status_code=401, detail="Instagram 로그인이 필요합니다. 사이트의 Instagram 로그인 버튼을 눌러 먼저 로그인해 주세요.")
+
+            # A full DOMContentLoaded wait can occasionally time out on Instagram even
+            # though the post itself is already usable. Navigate on commit first, then
+            # give the app a short render window.
+            try:
+                await page.goto(req.url, wait_until="commit", timeout=25000)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Instagram 게시글을 열지 못했습니다: {type(e).__name__}: {e}")
+
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=12000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(1400)
+
+            if "/accounts/login" in page.url:
+                raise HTTPException(status_code=401, detail="Instagram 로그인 세션이 만료되었습니다. 다시 로그인해 주세요.")
+
+            try:
+                await click_more_comments(page, shortcode, req.max_rounds)
+                comments = await find_comment_blocks(page, shortcode)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Instagram 댓글 수집 중 오류: {type(e).__name__}: {e}")
+
+            return {"ok": True, "count": len(comments), "comments": comments}
         finally:
             if temp_ctx is not None:
-                try: await temp_ctx.close()
-                except Exception: pass
+                try:
+                    await temp_ctx.close()
+                except Exception:
+                    pass
             if temp_pw is not None:
-                try: await temp_pw.stop()
-                except Exception: pass
+                try:
+                    await temp_pw.stop()
+                except Exception:
+                    pass
 
 
 @app.on_event("startup")
