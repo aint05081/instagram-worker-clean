@@ -175,13 +175,13 @@ async def login_page(client_id: str, sig: str = "", return_to: str = ""):
 *{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111;overflow-x:hidden}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
 .card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px;font-size:26px}} .muted{{color:#666;line-height:1.55}}
 .browser{{position:relative;width:100%;display:flex;justify-content:center;overflow:hidden}} #shot{{width:100%;height:auto;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:pointer;background:#eee;outline:none;touch-action:manipulation}}
-#kbd{{position:fixed;left:-10000px;top:0;width:2px;height:2px;opacity:.01}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
+#kbd{{position:fixed;left:50%;bottom:2px;width:2px;height:2px;transform:translateX(-50%);opacity:.01;font-size:16px;z-index:1;pointer-events:none;border:0;padding:0;resize:none}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
 .tip{{background:#f2f6ff;border:1px solid #dbe6ff;border-radius:12px;padding:11px 13px;margin:10px 0 14px;line-height:1.5}}
 @media(max-width:640px){{body{{background:#fff}} .wrap{{margin:0;padding:0}} .card{{border:0;border-radius:0;box-shadow:none;padding:12px 10px;min-height:100vh}} h1{{font-size:21px;margin-top:2px}} .muted{{font-size:13px;margin:5px 0}} .tip{{font-size:13px;margin:8px 0 10px;padding:9px 10px}} #state{{font-size:13px;margin:7px 0}} .browser{{margin:0 auto;width:100%;max-width:430px;background:#f4f4f4;border-radius:12px}} #shot{{max-width:100%;border-radius:12px;border-color:#ddd}} .controls{{position:sticky;bottom:0;z-index:20;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);padding:10px 0 max(10px,env(safe-area-inset-bottom));margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}} .controls button,.controls a.btn{{width:100%;min-height:48px;font-size:14px;padding:9px 6px;display:flex;align-items:center;justify-content:center}} #done,#back{{grid-column:span 3}} }}
 </style></head><body><div class="wrap"><div class="card"><h1>Instagram 로그인</h1>
 <p class="muted">아래는 서버에서 실행 중인 전용 Instagram 브라우저입니다. 로그인 정보는 Vercel로 전달되지 않고 이 브라우저 세션에만 사용됩니다.</p>
 <div class="tip"><b>Instagram 화면의 입력칸을 직접 클릭한 뒤 그냥 키보드로 입력하세요.</b> 아이디/비밀번호 붙여넣기도 되고, Enter·Tab·Backspace도 바로 동작합니다.</div>
-<div id="state">브라우저 준비 중...</div><div class="browser"><img id="shot" tabindex="0" alt="Instagram remote browser"><textarea id="kbd" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
+<div id="state">브라우저 준비 중...</div><div class="browser"><img id="shot" tabindex="0" alt="Instagram remote browser"><textarea id="kbd" inputmode="text" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea></div>
 <div class="controls"><button id="done">로그인 완료 확인</button><button class="secondary key" data-key="Tab">Tab</button><button class="secondary key" data-key="Enter">Enter</button><button class="secondary key" data-key="Backspace">Backspace</button><a class="btn" id="back" href="{safe_return or '/'}">분석 사이트로 돌아가기</a></div>
 </div></div><script>
 const CLIENT={safe_client!r}, SIG={safe_sig!r};
@@ -193,7 +193,21 @@ async function sendText(text){{if(!text)return;await post(`/session/${{CLIENT}}/
 async function sendKey(key){{await post(`/session/${{CLIENT}}/key?sig=${{encodeURIComponent(SIG)}}`,{{key}})}}
 async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}&mobile=${{MOBILE?'1':'0'}}`);await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
 async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());remoteW=s.width||remoteW;remoteH=s.height||remoteH;state.textContent=s.logged_in?'✅ Instagram 로그인됨':(s.mobile?'📱 모바일 Instagram 로그인 진행 중':'Instagram 로그인 진행 중')+' · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,700)}}}}
-shot.addEventListener('click',async e=>{{const r=shot.getBoundingClientRect();const x=(e.clientX-r.left)*remoteW/r.width;const y=(e.clientY-r.top)*remoteH/r.height;try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}});kbd.focus({{preventScroll:true}})}}catch(err){{alert(err.message)}}}});
+function focusMobileKeyboard(){{
+  // iOS/Android only opens the software keyboard when focus happens synchronously
+  // inside the user's tap gesture. Do this BEFORE any await/fetch.
+  try{{kbd.focus({{preventScroll:true}});const n=kbd.value.length;kbd.setSelectionRange(n,n)}}catch(_e){{}}
+}}
+async function forwardPointer(e){{
+  const r=shot.getBoundingClientRect();
+  const clientX=(e.touches&&e.touches[0]?e.touches[0].clientX:e.clientX);
+  const clientY=(e.touches&&e.touches[0]?e.touches[0].clientY:e.clientY);
+  const x=(clientX-r.left)*remoteW/r.width;
+  const y=(clientY-r.top)*remoteH/r.height;
+  try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}})}}catch(err){{alert(err.message)}}
+}}
+shot.addEventListener('pointerdown',e=>{{focusMobileKeyboard();void forwardPointer(e)}},{{passive:true}});
+shot.addEventListener('touchstart',e=>{{focusMobileKeyboard()}},{{passive:true}});
 kbd.addEventListener('compositionstart',()=>{{composing=true}});
 kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
 kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
