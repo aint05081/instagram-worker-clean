@@ -206,14 +206,14 @@ async def login_page(client_id: str, sig: str = "", return_to: str = ""):
 <title>Instagram 로그인</title><style>
 *{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111;overflow-x:hidden}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
 .card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px;font-size:26px}} .muted{{color:#666;line-height:1.55}}
-.browser{{position:relative;width:100%;display:flex;justify-content:center;overflow:hidden}} #shot{{width:100%;height:auto;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:pointer;background:#eee;outline:none;touch-action:manipulation}}
+.browser{{position:relative;width:100%;display:flex;justify-content:center;overflow:hidden}} #shot{{width:100%;height:auto;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:pointer;background:#eee;outline:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}}
 #kbd{{position:fixed;left:8px;bottom:72px;width:1px;height:1px;opacity:.02;font-size:16px;z-index:9999;pointer-events:none;border:0;padding:0;resize:none;background:transparent;color:transparent}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
 .tip{{background:#f2f6ff;border:1px solid #dbe6ff;border-radius:12px;padding:11px 13px;margin:10px 0 14px;line-height:1.5}}
 @media(max-width:640px){{body{{background:#fff}} .wrap{{margin:0;padding:0}} .card{{border:0;border-radius:0;box-shadow:none;padding:12px 10px;min-height:100vh}} h1{{font-size:21px;margin-top:2px}} .muted{{font-size:13px;margin:5px 0}} .tip{{font-size:13px;margin:8px 0 10px;padding:9px 10px}} #state{{font-size:13px;margin:7px 0}} .browser{{margin:0 auto;width:100%;max-width:430px;background:#f4f4f4;border-radius:12px}} #shot{{max-width:100%;border-radius:12px;border-color:#ddd}} .controls{{position:sticky;bottom:0;z-index:20;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);padding:10px 0 max(10px,env(safe-area-inset-bottom));margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}} .controls button,.controls a.btn{{width:100%;min-height:48px;font-size:14px;padding:9px 6px;display:flex;align-items:center;justify-content:center}} #done,#back{{grid-column:span 3}} }}
 </style></head><body><div class="wrap"><div class="card"><h1>Instagram 로그인</h1>
 <p class="muted">아래는 서버에서 실행 중인 전용 Instagram 브라우저입니다. 로그인 정보는 Vercel로 전달되지 않고 이 브라우저 세션에만 사용됩니다.</p>
 <div class="tip"><b>Instagram 화면의 입력칸을 직접 클릭한 뒤 그냥 키보드로 입력하세요.</b> 아이디/비밀번호 붙여넣기도 되고, Enter·Tab·Backspace도 바로 동작합니다.</div>
-<div id="state">브라우저 준비 중...</div><div class="browser"><img id="shot" tabindex="0" alt="Instagram remote browser"><textarea id="kbd" inputmode="text" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea></div>
+<div id="state">브라우저 준비 중...</div><div class="browser"><img id="shot" alt="Instagram remote browser" draggable="false"><textarea id="kbd" inputmode="text" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea></div>
 <div class="controls"><button id="done">로그인 완료 확인</button><button class="secondary key" data-key="Tab">Tab</button><button class="secondary key" data-key="Enter">Enter</button><button class="secondary key" data-key="Backspace">Backspace</button><a class="btn" id="back" href="{safe_return or '/'}">분석 사이트로 돌아가기</a></div>
 </div></div><script>
 const CLIENT={safe_client!r}, SIG={safe_sig!r};
@@ -249,8 +249,33 @@ async function forwardPointer(e){{
   const y=(clientY-r.top)*remoteH/r.height;
   try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}},2)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}
 }}
-shot.addEventListener('pointerdown',e=>{{focusMobileKeyboard();void forwardPointer(e)}},{{passive:true}});
-shot.addEventListener('touchstart',e=>{{focusMobileKeyboard()}},{{passive:true}});
+// Keep the real textarea focused. Preventing the default pointer action is crucial on mobile:
+// otherwise the image steals focus as soon as the finger is released and the software keyboard closes.
+shot.addEventListener('pointerdown',e=>{{
+  if(MOBILE)e.preventDefault();
+  focusMobileKeyboard();
+  void forwardPointer(e);
+}},{{passive:false}});
+shot.addEventListener('touchstart',e=>{{
+  e.preventDefault();
+  focusMobileKeyboard();
+}},{{passive:false}});
+shot.addEventListener('mousedown',e=>{{if(MOBILE)e.preventDefault()}});
+shot.addEventListener('dragstart',e=>e.preventDefault());
+
+// Do not intentionally blur the keyboard field. If a browser briefly moves focus while
+// repainting the remote screenshot, return focus while the keyboard session is active.
+let keyboardArmed=false;
+const originalFocusMobileKeyboard=focusMobileKeyboard;
+focusMobileKeyboard=function(){{keyboardArmed=true;originalFocusMobileKeyboard();}};
+kbd.addEventListener('blur',()=>{{
+  if(!MOBILE||!keyboardArmed)return;
+  setTimeout(()=>{{
+    // This preserves an already-open keyboard on browsers that allow focus restoration.
+    // The initial keyboard opening still always happens from the user's tap above.
+    try{{kbd.focus({{preventScroll:true}})}}catch(_e){{}}
+  }},0);
+}});
 kbd.addEventListener('compositionstart',()=>{{composing=true}});
 kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}}});
 kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}}});
