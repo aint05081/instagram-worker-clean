@@ -648,8 +648,32 @@ def save_to_sheet(post_url: str, comments: List[Dict[str, Any]]) -> Dict[str, An
         if comment_id:
             existing.add(comment_id)
 
+    # 4) NEVER overwrite existing sheet rows.
+    # Find the absolute last non-empty row in the worksheet and write strictly below it.
+    start_row = None
     if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        all_values = ws.get_all_values()
+        last_nonempty_row = 0
+        for idx, existing_row in enumerate(all_values, start=1):
+            if any(str(cell).strip() for cell in existing_row):
+                last_nonempty_row = idx
+
+        start_row = max(2, last_nonempty_row + 1)
+        end_row = start_row + len(rows) - 1
+        end_col = len(sheet_headers)
+
+        if end_row > ws.row_count:
+            ws.add_rows(end_row - ws.row_count)
+
+        def col_letter(n: int) -> str:
+            out = ""
+            while n:
+                n, r = divmod(n - 1, 26)
+                out = chr(65 + r) + out
+            return out
+
+        target_range = f"A{start_row}:{col_letter(end_col)}{end_row}"
+        ws.update(target_range, rows, value_input_option="USER_ENTERED")
 
     return {
         "saved": len(rows),
@@ -657,6 +681,7 @@ def save_to_sheet(post_url: str, comments: List[Dict[str, Any]]) -> Dict[str, An
         "headers": sheet_headers,
         "unknown_headers": unknown_headers,
         "missing_headers": missing_required,
+        "start_row": start_row,
     }
 
 

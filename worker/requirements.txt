@@ -1,7 +1,3 @@
 fastapi
-gspread
-google-auth
-openai
-httpx
+uvicorn[standard]
 playwright
-uvicorn

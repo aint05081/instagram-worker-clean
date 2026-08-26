@@ -160,27 +160,33 @@ async def login_page(client_id: str, sig: str = "", return_to: str = ""):
     safe_sig = html.escape(sig, quote=True)
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Instagram 로그인</title><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111}} .wrap{{max-width:1320px;margin:24px auto;padding:0 18px}}
-.card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px}} .muted{{color:#666;line-height:1.5}}
-#shot{{width:100%;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:crosshair;background:#eee}}
-.controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} input{{padding:11px 12px;min-width:280px;border:1px solid #bbb;border-radius:10px}} button,a.btn{{padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
+.card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px}} .muted{{color:#666;line-height:1.55}}
+.browser{{position:relative;display:inline-block;width:100%;max-width:{VIEWPORT_W}px}} #shot{{width:100%;border:1px solid #bbb;border-radius:12px;display:block;cursor:default;background:#eee;outline:none}}
+#kbd{{position:fixed;left:-10000px;top:0;width:2px;height:2px;opacity:.01}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
+.tip{{background:#f2f6ff;border:1px solid #dbe6ff;border-radius:12px;padding:11px 13px;margin:10px 0 14px;line-height:1.5}}
 </style></head><body><div class="wrap"><div class="card"><h1>Instagram 로그인</h1>
-<p class="muted">아래 화면은 서버에서 실행 중인 전용 브라우저입니다. 화면을 클릭해 입력 위치를 선택한 뒤, 아래 입력칸에 내용을 적고 <b>선택한 곳에 입력</b>을 누르세요. 2단계 인증도 같은 방식으로 진행할 수 있습니다. 로그인 정보는 Vercel로 전달되지 않고 이 브라우저 세션에만 사용됩니다.</p>
-<div id="state">브라우저 준비 중…</div><img id="shot" alt="Instagram remote browser">
-<div class="controls"><input id="text" type="password" placeholder="선택한 입력칸에 넣을 텍스트"><button id="type">선택한 곳에 입력</button><button class="secondary" id="toggle">입력값 보기</button><button class="secondary key" data-key="Tab">Tab</button><button class="secondary key" data-key="Enter">Enter</button><button class="secondary key" data-key="Backspace">Backspace</button></div>
-<div class="controls"><button id="done">로그인 완료 확인</button><a class="btn" id="back" href="{safe_return or '/'}">분석 사이트로 돌아가기</a></div>
+<p class="muted">아래는 서버에서 실행 중인 전용 Instagram 브라우저입니다. 로그인 정보는 Vercel로 전달되지 않고 이 브라우저 세션에만 사용됩니다.</p>
+<div class="tip"><b>Instagram 화면의 입력칸을 직접 클릭한 뒤 그냥 키보드로 입력하세요.</b> 아이디/비밀번호 붙여넣기도 되고, Enter·Tab·Backspace도 바로 동작합니다.</div>
+<div id="state">브라우저 준비 중...</div><div class="browser"><img id="shot" tabindex="0" alt="Instagram remote browser"><textarea id="kbd" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
+<div class="controls"><button id="done">로그인 완료 확인</button><button class="secondary key" data-key="Tab">Tab</button><button class="secondary key" data-key="Enter">Enter</button><button class="secondary key" data-key="Backspace">Backspace</button><a class="btn" id="back" href="{safe_return or '/'}">분석 사이트로 돌아가기</a></div>
 </div></div><script>
-const CLIENT={safe_client!r}, SIG={safe_sig!r}; const shot=document.getElementById('shot'), state=document.getElementById('state');
+const CLIENT={safe_client!r}, SIG={safe_sig!r};
+const shot=document.getElementById('shot'), state=document.getElementById('state'), kbd=document.getElementById('kbd');
+let composing=false, refreshing=false;
 async function post(path,body={{}}){{const r=await fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json().catch(()=>({{}}));if(!r.ok)throw new Error(d.detail||'요청 실패');return d}}
-async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}`); await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
-async function refresh(){{try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`); if(r.ok){{shot.src=URL.createObjectURL(await r.blob())}} const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`).then(x=>x.json()); state.textContent=s.logged_in?'✅ Instagram 로그인됨':'Instagram 로그인 진행 중 · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}} setTimeout(refresh,1500)}}
-shot.addEventListener('click',async e=>{{const r=shot.getBoundingClientRect();const x=(e.clientX-r.left)*{VIEWPORT_W}/r.width;const y=(e.clientY-r.top)*{VIEWPORT_H}/r.height;try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}})}}catch(err){{alert(err.message)}}}});
-document.getElementById('type').onclick=async()=>{{const el=document.getElementById('text');try{{await post(`/session/${{CLIENT}}/type?sig=${{encodeURIComponent(SIG)}}`,{{text:el.value}});el.value='';}}catch(e){{alert(e.message)}}}};
-document.getElementById('toggle').onclick=()=>{{const el=document.getElementById('text');el.type=el.type==='password'?'text':'password'}};
-document.querySelectorAll('.key').forEach(b=>b.onclick=()=>post(`/session/${{CLIENT}}/key?sig=${{encodeURIComponent(SIG)}}`,{{key:b.dataset.key}}).catch(e=>alert(e.message)));
-document.getElementById('done').onclick=async()=>{{const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`).then(x=>x.json()); if(!s.logged_in) return alert('아직 Instagram 로그인 세션이 확인되지 않았습니다.'); await post(`/session/${{CLIENT}}/close?sig=${{encodeURIComponent(SIG)}}`); location.href={safe_return!r}||'/';}};
+async function sendText(text){{if(!text)return;await post(`/session/${{CLIENT}}/type?sig=${{encodeURIComponent(SIG)}}`,{{text}})}}
+async function sendKey(key){{await post(`/session/${{CLIENT}}/key?sig=${{encodeURIComponent(SIG)}}`,{{key}})}}
+async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}`);await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
+async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());state.textContent=s.logged_in?'✅ Instagram 로그인됨':'Instagram 로그인 진행 중 · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,700)}}}}
+shot.addEventListener('click',async e=>{{const r=shot.getBoundingClientRect();const x=(e.clientX-r.left)*{VIEWPORT_W}/r.width;const y=(e.clientY-r.top)*{VIEWPORT_H}/r.height;try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}});kbd.focus({{preventScroll:true}})}}catch(err){{alert(err.message)}}}});
+kbd.addEventListener('compositionstart',()=>{{composing=true}});
+kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
+kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
+kbd.addEventListener('keydown',async e=>{{if(['Enter','Tab','Backspace','Escape'].includes(e.key)){{e.preventDefault();try{{await sendKey(e.key)}}catch(err){{alert(err.message)}}}}}});
+document.querySelectorAll('.key').forEach(b=>b.onclick=async()=>{{try{{await sendKey(b.dataset.key);kbd.focus({{preventScroll:true}})}}catch(e){{alert(e.message)}}}});
+document.getElementById('done').onclick=async()=>{{const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`).then(x=>x.json());if(!s.logged_in)return alert('아직 Instagram 로그인 세션이 확인되지 않았습니다.');await post(`/session/${{CLIENT}}/close?sig=${{encodeURIComponent(SIG)}}`);location.href={safe_return!r}||'/'}};
 start();</script></body></html>'''
-
 
 def check_login_sig(client_id: str, sig: str):
     valid_client_id(client_id)

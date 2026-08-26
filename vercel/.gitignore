@@ -1,0 +1,6 @@
+.env
+service_account.json
+instagram_browser_profile/
+exports/
+__pycache__/
+.venv/
