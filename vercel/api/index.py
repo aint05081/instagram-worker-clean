@@ -777,83 +777,49 @@ async def instagram_status(client_id: str):
         return {"ok": False, "logged_in": False, "label": "Worker 연결 실패", "detail": str(e)}
 
 
-@app.post("/api/jobs")
-async def create_analysis_job(req: AnalyzeRequest):
+@app.post("/api/analyze")
+async def analyze_sync(req: AnalyzeRequest):
+    """Run the full pipeline in one request.
+
+    Vercel serverless instances do not share in-memory state, so job_id polling can
+    lose the job between requests. This endpoint intentionally performs scrape ->
+    OpenAI -> Google Sheets in a single invocation and returns the final result.
+    """
     try:
         extract_shortcode(req.url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    job_id = create_job(req.url)
-    asyncio.create_task(run_analysis_job(job_id, req))
-    return {"job_id": job_id}
-
-
-async def run_analysis_job(job_id: str, req: AnalyzeRequest):
     try:
-        job_update(job_id, state="running", stage="준비", message="분석 작업을 시작합니다.", progress=2, log="작업 시작")
-        comments = await scrape_comments(req.url, req.max_rounds, req.client_id, job_id=job_id)
-        if not comments:
-            job_update(job_id, log="수집된 댓글이 0개입니다.")
+        comments = await scrape_comments(req.url, req.max_rounds, req.client_id, job_id=None)
 
         if req.analyze_ai and comments:
-            comments = await analyze_comments(comments, job_id=job_id)
-        elif comments:
-            job_update(job_id, stage="AI 분석", message="AI 분석 옵션이 꺼져 있어 건너뜁니다.", progress=90, log="AI 분석 건너뜀")
+            comments = await analyze_comments(comments, job_id=None)
 
         saved = 0
         sheet_error = None
         sheet_info = None
         if req.save_sheet and comments:
             try:
-                job_update(job_id, stage="Google Sheets 저장", message="시트 1행 헤더를 읽고 컬럼 이름에 맞춰 저장하고 있습니다.", progress=92, log="Google Sheets 연결 시작 · 1행 헤더 확인")
                 sheet_info = await asyncio.to_thread(save_to_sheet, req.url, comments)
                 saved = int(sheet_info.get("saved", 0))
-                columns = int(sheet_info.get("columns", 0))
-                headers = sheet_info.get("headers", [])
-                job_update(job_id, log="시트 헤더: " + " | ".join(headers))
-                if sheet_info.get("unknown_headers"):
-                    job_update(job_id, log="알 수 없는 시트 컬럼(빈 값으로 유지): " + ", ".join(sheet_info["unknown_headers"]))
-                if sheet_info.get("missing_headers"):
-                    job_update(job_id, log="시트에 없는 표준 컬럼: " + ", ".join(sheet_info["missing_headers"]))
-                job_update(job_id, message=f"Google Sheets 저장 완료 · {saved}개 행 × {columns}개 컬럼", progress=96, log=f"Google Sheets 저장 완료: {saved}개 행 / {columns}개 컬럼")
             except Exception as e:
                 sheet_error = str(e)
-                job_update(job_id, message="Google Sheets 저장에는 실패했지만 결과 생성은 계속합니다.", progress=96, log=f"Google Sheets 저장 실패: {sheet_error}")
-        else:
-            job_update(job_id, stage="결과 생성", message="결과 파일을 만드는 중입니다.", progress=94, log="Google Sheets 저장 건너뜀")
 
-        job_update(job_id, stage="결과 생성", message="CSV와 요약 결과를 생성하고 있습니다.", progress=97, log="CSV 생성 시작")
-        export_path = export_csv(req.url, comments)
         summary = summarize(comments)
-
-        result = {
+        return {
             "ok": True,
             "summary": summary,
             "comments": comments,
             "sheet_saved": saved,
             "sheet_info": sheet_info,
             "sheet_error": sheet_error,
-            "download_url": f"/api/download/{export_path.name}",
         }
-        jobs[job_id]["result"] = result
-        job_update(job_id, state="done", stage="완료", message=f"완료 · 댓글 {len(comments)}개 처리", progress=100, current=len(comments), total=len(comments), log="전체 작업 완료")
-    except HTTPException as e:
-        jobs[job_id]["error"] = e.detail
-        job_update(job_id, state="error", stage=jobs[job_id].get("stage") or "오류", message=str(e.detail), log=f"오류: {e.detail}")
+    except HTTPException:
+        raise
     except Exception as e:
-        detail = str(e) or e.__class__.__name__
-        jobs[job_id]["error"] = detail
-        job_update(job_id, state="error", message=detail, log=f"예외: {detail}")
         print(traceback.format_exc())
-
-
-@app.get("/api/jobs/{job_id}")
-async def get_analysis_job(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
-    return job
+        raise HTTPException(status_code=500, detail=str(e) or e.__class__.__name__)
 
 
 @app.get("/api/download/{filename}")
