@@ -4,6 +4,7 @@ import hashlib
 import html
 import os
 import re
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -23,6 +24,8 @@ MOBILE_VIEWPORT_H = int(os.getenv("MOBILE_VIEWPORT_H", "844"))
 
 sessions: Dict[str, Dict[str, Any]] = {}
 locks: Dict[str, asyncio.Lock] = {}
+op_locks: Dict[str, asyncio.Lock] = {}
+SESSION_IDLE_SECONDS = int(os.getenv("SESSION_IDLE_SECONDS", "1800"))
 
 
 def valid_client_id(client_id: str) -> str:
@@ -68,6 +71,7 @@ async def open_interactive_session(client_id: str, mobile: bool = False):
     if existing:
         try:
             if not existing["page"].is_closed():
+                existing["last_used"] = time.monotonic()
                 return existing
         except Exception:
             pass
@@ -81,7 +85,11 @@ async def open_interactive_session(client_id: str, mobile: bool = False):
         headless=True,
         viewport={"width": width, "height": height},
         locale="ko-KR",
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
+        args=[
+            "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+            "--disable-background-networking", "--disable-default-apps",
+            "--disable-extensions", "--disable-sync", "--no-first-run",
+        ],
     )
     if mobile:
         launch_kwargs.update({
@@ -92,9 +100,33 @@ async def open_interactive_session(client_id: str, mobile: bool = False):
         })
     ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-    await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2500)
-    obj = {"pw": pw, "context": ctx, "page": page, "width": width, "height": height, "mobile": mobile}
+
+    # Fonts/video/audio are unnecessary for login and cost a lot of startup time.
+    async def route_fast(route):
+        try:
+            if route.request.resource_type in {"font", "media"}:
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception:
+            pass
+    await page.route("**/*", route_fast)
+
+    logged = await cookies_logged_in(ctx)
+    target = "https://www.instagram.com/" if logged else "https://www.instagram.com/accounts/login/"
+    try:
+        # `commit` lets the remote screen appear immediately; subsequent screenshots fill in as Instagram renders.
+        await page.goto(target, wait_until="commit", timeout=20000)
+    except Exception:
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+    await page.wait_for_timeout(450)
+    obj = {
+        "pw": pw, "context": ctx, "page": page, "width": width, "height": height,
+        "mobile": mobile, "last_used": time.monotonic(),
+    }
     sessions[client_id] = obj
     return obj
 
@@ -175,7 +207,7 @@ async def login_page(client_id: str, sig: str = "", return_to: str = ""):
 *{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;margin:0;color:#111;overflow-x:hidden}} .wrap{{max-width:1320px;margin:20px auto;padding:0 18px}}
 .card{{background:#fff;border:1px solid #ddd;border-radius:18px;padding:18px;box-shadow:0 8px 30px #0000000b}} h1{{margin:0 0 8px;font-size:26px}} .muted{{color:#666;line-height:1.55}}
 .browser{{position:relative;width:100%;display:flex;justify-content:center;overflow:hidden}} #shot{{width:100%;height:auto;max-width:{VIEWPORT_W}px;border:1px solid #bbb;border-radius:12px;display:block;cursor:pointer;background:#eee;outline:none;touch-action:manipulation}}
-#kbd{{position:fixed;left:50%;bottom:2px;width:2px;height:2px;transform:translateX(-50%);opacity:.01;font-size:16px;z-index:1;pointer-events:none;border:0;padding:0;resize:none}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
+#kbd{{position:fixed;left:8px;bottom:72px;width:1px;height:1px;opacity:.02;font-size:16px;z-index:9999;pointer-events:none;border:0;padding:0;resize:none;background:transparent;color:transparent}} .controls{{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}} button,a.btn{{min-height:44px;padding:11px 14px;border:0;border-radius:10px;background:#111;color:#fff;text-decoration:none;cursor:pointer;font-size:15px}} button.secondary{{background:#eee;color:#111}} #state{{font-weight:700;margin:10px 0}}
 .tip{{background:#f2f6ff;border:1px solid #dbe6ff;border-radius:12px;padding:11px 13px;margin:10px 0 14px;line-height:1.5}}
 @media(max-width:640px){{body{{background:#fff}} .wrap{{margin:0;padding:0}} .card{{border:0;border-radius:0;box-shadow:none;padding:12px 10px;min-height:100vh}} h1{{font-size:21px;margin-top:2px}} .muted{{font-size:13px;margin:5px 0}} .tip{{font-size:13px;margin:8px 0 10px;padding:9px 10px}} #state{{font-size:13px;margin:7px 0}} .browser{{margin:0 auto;width:100%;max-width:430px;background:#f4f4f4;border-radius:12px}} #shot{{max-width:100%;border-radius:12px;border-color:#ddd}} .controls{{position:sticky;bottom:0;z-index:20;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);padding:10px 0 max(10px,env(safe-area-inset-bottom));margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}} .controls button,.controls a.btn{{width:100%;min-height:48px;font-size:14px;padding:9px 6px;display:flex;align-items:center;justify-content:center}} #done,#back{{grid-column:span 3}} }}
 </style></head><body><div class="wrap"><div class="card"><h1>Instagram 로그인</h1>
@@ -188,11 +220,22 @@ const CLIENT={safe_client!r}, SIG={safe_sig!r};
 const shot=document.getElementById('shot'), state=document.getElementById('state'), kbd=document.getElementById('kbd');
 const MOBILE=window.matchMedia('(max-width: 640px)').matches || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
 let composing=false, refreshing=false, remoteW=MOBILE?{MOBILE_VIEWPORT_W}:{VIEWPORT_W}, remoteH=MOBILE?{MOBILE_VIEWPORT_H}:{VIEWPORT_H};
-async function post(path,body={{}}){{const r=await fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json().catch(()=>({{}}));if(!r.ok)throw new Error(d.detail||'요청 실패');return d}}
+async function post(path,body={{}},retries=1){{
+  let lastErr;
+  for(let i=0;i<=retries;i++){{
+    try{{
+      const r=await fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body),cache:'no-store'}});
+      const d=await r.json().catch(()=>({{}}));
+      if(!r.ok)throw new Error(d.detail||`요청 실패 (${{r.status}})`);
+      return d;
+    }}catch(e){{lastErr=e;if(i<retries)await new Promise(res=>setTimeout(res,180));}}
+  }}
+  throw lastErr||new Error('요청 실패');
+}}
 async function sendText(text){{if(!text)return;await post(`/session/${{CLIENT}}/type?sig=${{encodeURIComponent(SIG)}}`,{{text}})}}
 async function sendKey(key){{await post(`/session/${{CLIENT}}/key?sig=${{encodeURIComponent(SIG)}}`,{{key}})}}
 async function start(){{try{{await post(`/session/${{CLIENT}}/start?sig=${{encodeURIComponent(SIG)}}&mobile=${{MOBILE?'1':'0'}}`);await refresh();}}catch(e){{state.textContent='오류: '+e.message}}}}
-async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());remoteW=s.width||remoteW;remoteH=s.height||remoteH;state.textContent=s.logged_in?'✅ Instagram 로그인됨':(s.mobile?'📱 모바일 Instagram 로그인 진행 중':'Instagram 로그인 진행 중')+' · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,700)}}}}
+async function refresh(){{if(refreshing)return;refreshing=true;try{{const r=await fetch(`/session/${{CLIENT}}/screenshot?sig=${{encodeURIComponent(SIG)}}&t=${{Date.now()}}`,{{cache:'no-store'}});if(r.ok){{const old=shot.src;shot.src=URL.createObjectURL(await r.blob());if(old&&old.startsWith('blob:'))URL.revokeObjectURL(old)}}const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`,{{cache:'no-store'}}).then(x=>x.json());remoteW=s.width||remoteW;remoteH=s.height||remoteH;state.textContent=s.logged_in?'✅ Instagram 로그인됨':(s.mobile?'📱 모바일 Instagram 로그인 진행 중':'Instagram 로그인 진행 중')+' · '+(s.url||'');}}catch(e){{state.textContent='오류: '+e.message}}finally{{refreshing=false;setTimeout(refresh,900)}}}}
 function focusMobileKeyboard(){{
   // iOS/Android only opens the software keyboard when focus happens synchronously
   // inside the user's tap gesture. Do this BEFORE any await/fetch.
@@ -204,22 +247,26 @@ async function forwardPointer(e){{
   const clientY=(e.touches&&e.touches[0]?e.touches[0].clientY:e.clientY);
   const x=(clientX-r.left)*remoteW/r.width;
   const y=(clientY-r.top)*remoteH/r.height;
-  try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}})}}catch(err){{alert(err.message)}}
+  try{{await post(`/session/${{CLIENT}}/click?sig=${{encodeURIComponent(SIG)}}`,{{x,y}},2)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}
 }}
 shot.addEventListener('pointerdown',e=>{{focusMobileKeyboard();void forwardPointer(e)}},{{passive:true}});
 shot.addEventListener('touchstart',e=>{{focusMobileKeyboard()}},{{passive:true}});
 kbd.addEventListener('compositionstart',()=>{{composing=true}});
-kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
-kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{alert(err.message)}}}});
-kbd.addEventListener('keydown',async e=>{{if(['Enter','Tab','Backspace','Escape'].includes(e.key)){{e.preventDefault();try{{await sendKey(e.key)}}catch(err){{alert(err.message)}}}}}});
-document.querySelectorAll('.key').forEach(b=>b.onclick=async()=>{{try{{await sendKey(b.dataset.key);kbd.focus({{preventScroll:true}})}}catch(e){{alert(e.message)}}}});
-document.getElementById('done').onclick=async()=>{{const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`).then(x=>x.json());if(!s.logged_in)return alert('아직 Instagram 로그인 세션이 확인되지 않았습니다.');await post(`/session/${{CLIENT}}/close?sig=${{encodeURIComponent(SIG)}}`);location.href={safe_return!r}||'/'}};
+kbd.addEventListener('compositionend',async e=>{{composing=false;const text=e.data||kbd.value;kbd.value='';try{{await sendText(text)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}}});
+kbd.addEventListener('input',async()=>{{if(composing)return;const text=kbd.value;if(!text)return;kbd.value='';try{{await sendText(text)}}catch(err){{state.textContent='입력 전달 오류: '+err.message}}}});
+kbd.addEventListener('keydown',async e=>{{if(['Enter','Tab','Backspace','Escape'].includes(e.key)){{e.preventDefault();try{{await sendKey(e.key)}}catch(err){{state.textContent='키 입력 오류: '+err.message}}}}}});
+document.querySelectorAll('.key').forEach(b=>b.onclick=async()=>{{try{{await sendKey(b.dataset.key);kbd.focus({{preventScroll:true}})}}catch(e){{state.textContent='키 입력 오류: '+e.message}}}});
+document.getElementById('done').onclick=async()=>{{const s=await fetch(`/session/${{CLIENT}}/status?sig=${{encodeURIComponent(SIG)}}`).then(x=>x.json());if(!s.logged_in)return alert('아직 Instagram 로그인 세션이 확인되지 않았습니다.');location.href={safe_return!r}||'/'}};
 start();</script></body></html>'''
 
 def check_login_sig(client_id: str, sig: str):
     valid_client_id(client_id)
     if not valid_sig(client_id, sig):
         raise HTTPException(status_code=401, detail="로그인 세션 인증 실패")
+
+
+def session_op_lock(client_id: str) -> asyncio.Lock:
+    return op_locks.setdefault(valid_client_id(client_id), asyncio.Lock())
 
 
 @app.post("/session/{client_id}/start")
@@ -232,32 +279,41 @@ async def session_start(client_id: str, sig: str = Query(default=""), mobile: in
 @app.get("/session/{client_id}/screenshot")
 async def screenshot(client_id: str, sig: str = Query(default="")):
     check_login_sig(client_id, sig)
-    obj = await open_interactive_session(client_id)
-    png = await obj["page"].screenshot(type="png")
-    return Response(content=png, media_type="image/png", headers={"Cache-Control":"no-store"})
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id)
+        obj["last_used"] = time.monotonic()
+        jpg = await obj["page"].screenshot(type="jpeg", quality=58)
+    return Response(content=jpg, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
 
 
 @app.get("/session/{client_id}/status")
 async def session_status(client_id: str, sig: str = Query(default="")):
     check_login_sig(client_id, sig)
-    obj = await open_interactive_session(client_id)
-    return {"logged_in": await cookies_logged_in(obj["context"]), "url": obj["page"].url, "mobile": obj.get("mobile", False), "width": obj.get("width"), "height": obj.get("height")}
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id)
+        obj["last_used"] = time.monotonic()
+        logged = await cookies_logged_in(obj["context"])
+        url = obj["page"].url
+    return {"logged_in": logged, "url": url, "mobile": obj.get("mobile", False), "width": obj.get("width"), "height": obj.get("height")}
 
 
 @app.post("/session/{client_id}/click")
 async def session_click(client_id: str, req: ClickReq, sig: str = Query(default="")):
     check_login_sig(client_id, sig)
-    obj = await open_interactive_session(client_id)
-    await obj["page"].mouse.click(req.x, req.y)
-    await obj["page"].wait_for_timeout(250)
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id)
+        obj["last_used"] = time.monotonic()
+        await obj["page"].mouse.click(req.x, req.y)
     return {"ok": True}
 
 
 @app.post("/session/{client_id}/type")
 async def session_type(client_id: str, req: TypeReq, sig: str = Query(default="")):
     check_login_sig(client_id, sig)
-    obj = await open_interactive_session(client_id)
-    await obj["page"].keyboard.insert_text(req.text)
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id)
+        obj["last_used"] = time.monotonic()
+        await obj["page"].keyboard.insert_text(req.text)
     return {"ok": True}
 
 
@@ -266,8 +322,10 @@ async def session_key(client_id: str, req: KeyReq, sig: str = Query(default=""))
     check_login_sig(client_id, sig)
     if req.key not in {"Tab", "Enter", "Backspace", "Escape"}:
         raise HTTPException(status_code=400, detail="허용되지 않은 키")
-    obj = await open_interactive_session(client_id)
-    await obj["page"].keyboard.press(req.key)
+    async with session_op_lock(client_id):
+        obj = await open_interactive_session(client_id)
+        obj["last_used"] = time.monotonic()
+        await obj["page"].keyboard.press(req.key)
     return {"ok": True}
 
 
@@ -369,22 +427,51 @@ async def find_comment_blocks(page: Page, shortcode: str) -> List[Dict[str, Any]
 async def scrape(req: ScrapeReq, x_worker_key: Optional[str] = Header(default=None), authorization: Optional[str] = Header(default=None)):
     require_key(x_worker_key, authorization)
     client_id=valid_client_id(req.client_id); shortcode=extract_shortcode(req.url)
-    if client_id in sessions:
-        await close_session(client_id)
     lock=locks.setdefault(client_id,asyncio.Lock())
     async with lock:
-        pw=await async_playwright().start()
-        try:
-            ctx=await pw.chromium.launch_persistent_context(user_data_dir=str(profile_dir(client_id)),headless=True,viewport={"width":VIEWPORT_W,"height":VIEWPORT_H},locale="ko-KR",args=["--no-sandbox","--disable-dev-shm-usage"])
-            if not await cookies_logged_in(ctx):
-                await ctx.close(); raise HTTPException(status_code=401,detail="Instagram 로그인이 필요합니다. 사이트의 Instagram 로그인 버튼을 눌러 먼저 로그인해 주세요.")
+        # Reuse the browser that the user just logged into. This avoids a full Chromium restart.
+        interactive = sessions.get(client_id)
+        temp_pw = None
+        temp_ctx = None
+        if interactive and not interactive["page"].is_closed():
+            ctx = interactive["context"]
+            page = interactive["page"]
+            interactive["last_used"] = time.monotonic()
+        else:
+            temp_pw=await async_playwright().start()
+            temp_ctx=await temp_pw.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir(client_id)),headless=True,
+                viewport={"width":VIEWPORT_W,"height":VIEWPORT_H},locale="ko-KR",
+                args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"]
+            )
+            ctx=temp_ctx
             page=ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await page.goto(req.url,wait_until='domcontentloaded',timeout=60000); await page.wait_for_timeout(3500)
+        try:
+            if not await cookies_logged_in(ctx):
+                raise HTTPException(status_code=401,detail="Instagram 로그인이 필요합니다. 사이트의 Instagram 로그인 버튼을 눌러 먼저 로그인해 주세요.")
+            await page.goto(req.url,wait_until='domcontentloaded',timeout=45000)
+            await page.wait_for_timeout(1200)
             if '/accounts/login' in page.url:
-                await ctx.close(); raise HTTPException(status_code=401,detail="Instagram 로그인 세션이 만료되었습니다. 다시 로그인해 주세요.")
+                raise HTTPException(status_code=401,detail="Instagram 로그인 세션이 만료되었습니다. 다시 로그인해 주세요.")
             await click_more_comments(page,shortcode,req.max_rounds)
             comments=await find_comment_blocks(page,shortcode)
-            await ctx.close()
             return {"ok":True,"count":len(comments),"comments":comments}
         finally:
-            await pw.stop()
+            if temp_ctx is not None:
+                try: await temp_ctx.close()
+                except Exception: pass
+            if temp_pw is not None:
+                try: await temp_pw.stop()
+                except Exception: pass
+
+
+@app.on_event("startup")
+async def start_session_reaper():
+    async def reaper():
+        while True:
+            await asyncio.sleep(120)
+            now=time.monotonic()
+            stale=[cid for cid,obj in list(sessions.items()) if now-float(obj.get("last_used",now))>SESSION_IDLE_SECONDS]
+            for cid in stale:
+                await close_session(cid)
+    asyncio.create_task(reaper())
