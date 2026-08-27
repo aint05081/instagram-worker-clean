@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Awaitable
 
 import gspread
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.oauth2.service_account import Credentials
@@ -92,6 +92,22 @@ class AnalyzeRequest(BaseModel):
     analyze_ai: bool = True
     save_sheet: bool = True
     max_rounds: int = 120
+
+
+class JobCallbackRequest(BaseModel):
+    job_id: str
+    url: str
+    comments: List[Dict[str, Any]]
+    analyze_ai: bool = True
+    save_sheet: bool = True
+
+
+def public_base_url(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if not host:
+        return str(request.base_url).rstrip("/")
+    return f"{proto}://{host}".rstrip("/")
 
 
 def extract_shortcode(url: str) -> str:
@@ -800,6 +816,87 @@ async def instagram_status(client_id: str):
             return {"ok": r.is_success, "logged_in": bool(data.get("logged_in")), "label": "로그인됨" if data.get("logged_in") else "로그인 필요", "detail": data.get("detail", "")}
     except Exception as e:
         return {"ok": False, "logged_in": False, "label": "Worker 연결 실패", "detail": str(e)}
+
+
+@app.post("/api/job-start")
+async def job_start(req: AnalyzeRequest, request: Request):
+    if not INSTAGRAM_WORKER_URL:
+        raise HTTPException(status_code=503, detail="INSTAGRAM_WORKER_URL이 설정되지 않았습니다.")
+    try:
+        extract_shortcode(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", req.client_id or ""):
+        raise HTTPException(status_code=400, detail="잘못된 client_id입니다.")
+
+    callback_url = public_base_url(request) + "/api/job-callback"
+    headers = {"X-Worker-Key": INSTAGRAM_WORKER_KEY} if INSTAGRAM_WORKER_KEY else {}
+    payload = {
+        "client_id": req.client_id,
+        "url": req.url,
+        "max_rounds": req.max_rounds,
+        "analyze_ai": req.analyze_ai,
+        "save_sheet": req.save_sheet,
+        "callback_url": callback_url,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(f"{INSTAGRAM_WORKER_URL}/jobs/start", json=payload, headers=headers)
+            data = r.json()
+            if r.status_code >= 400:
+                raise HTTPException(status_code=503, detail=data.get("detail", f"Worker 오류 {r.status_code}"))
+            return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"백그라운드 작업 시작 실패: {e}")
+
+
+@app.get("/api/job-status")
+async def job_status(job_id: str):
+    if not INSTAGRAM_WORKER_URL:
+        raise HTTPException(status_code=503, detail="INSTAGRAM_WORKER_URL이 설정되지 않았습니다.")
+    headers = {"X-Worker-Key": INSTAGRAM_WORKER_KEY} if INSTAGRAM_WORKER_KEY else {}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{INSTAGRAM_WORKER_URL}/jobs/status", params={"job_id": job_id}, headers=headers)
+            data = r.json()
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=data.get("detail", "작업 상태 확인 실패"))
+            return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"작업 상태 확인 실패: {e}")
+
+
+@app.post("/api/job-callback")
+async def job_callback(req: JobCallbackRequest, x_worker_key: Optional[str] = Header(default=None)):
+    if INSTAGRAM_WORKER_KEY and not hmac.compare_digest((x_worker_key or "").strip(), INSTAGRAM_WORKER_KEY):
+        raise HTTPException(status_code=401, detail="Callback 인증 실패")
+
+    comments = req.comments
+    if req.analyze_ai and comments:
+        comments = await analyze_comments(comments, job_id=None)
+
+    saved = 0
+    sheet_error = None
+    sheet_info = None
+    if req.save_sheet and comments:
+        try:
+            sheet_info = await asyncio.to_thread(save_to_sheet, req.url, comments)
+            saved = int(sheet_info.get("saved", 0))
+        except Exception as e:
+            sheet_error = str(e)
+
+    return {
+        "ok": True,
+        "summary": summarize(comments),
+        "comments": comments,
+        "sheet_saved": saved,
+        "sheet_info": sheet_info,
+        "sheet_error": sheet_error,
+    }
 
 
 @app.post("/api/analyze")

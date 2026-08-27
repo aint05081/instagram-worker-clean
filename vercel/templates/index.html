@@ -179,6 +179,68 @@ $('instagramLogin').addEventListener('click', async () => {
 $('refreshConnections').addEventListener('click', loadSystemStatus);
 loadSystemStatus();
 
+const ACTIVE_JOB_KEY = 'ig_comment_active_job_id';
+let currentJobId = localStorage.getItem(ACTIVE_JOB_KEY) || '';
+let jobPolling = false;
+
+function saveActiveJob(jobId){
+  currentJobId = jobId || '';
+  if(currentJobId) localStorage.setItem(ACTIVE_JOB_KEY, currentJobId);
+  else localStorage.removeItem(ACTIVE_JOB_KEY);
+}
+
+async function fetchJobStatus(jobId){
+  const res = await fetch(`/api/job-status?job_id=${encodeURIComponent(jobId)}`, {cache:'no-store'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.detail || '작업 상태 확인 실패');
+  return data;
+}
+
+async function pollBackgroundJob(jobId){
+  if(!jobId || jobPolling) return;
+  jobPolling = true;
+  try {
+    while(currentJobId === jobId){
+      let job;
+      try {
+        job = await fetchJobStatus(jobId);
+      } catch(err) {
+        // 모바일이 백그라운드에서 돌아온 직후 네트워크가 아직 복구 중일 수 있다.
+        $('logs').textContent += `\n[상태 확인 대기] ${err.message}`;
+        await new Promise(r=>setTimeout(r,2500));
+        continue;
+      }
+
+      const pct = Number(job.progress || 0);
+      setSimpleProgress(job.stage || '서버 작업 중', job.message || '백그라운드에서 처리 중입니다.', pct, job.state === 'done' ? '완료' : job.state === 'error' ? '오류' : '진행 중');
+      $('logs').textContent = `[백그라운드 작업 ${job.id}]\n${job.stage || ''} · ${job.message || ''}\n진행률 ${pct}%`;
+
+      if(job.state === 'done'){
+        const result = job.result || {};
+        saveActiveJob('');
+        runBtn.disabled = false;
+        setSimpleProgress('완료', `댓글 ${result.comments?.length || job.count || 0}개 처리 완료`, 100, '완료');
+        $('logs').textContent += `\n[완료] 댓글 ${result.comments?.length || job.count || 0}개 처리`;
+        if(result.sheet_saved !== undefined) $('logs').textContent += `\n[Google Sheets] 새로 저장 ${result.sheet_saved}개`;
+        render(result);
+        loadSystemStatus();
+        return;
+      }
+
+      if(job.state === 'error'){
+        saveActiveJob('');
+        runBtn.disabled = false;
+        showFatal(job.error || job.message || '백그라운드 작업 중 오류가 발생했습니다.');
+        return;
+      }
+
+      await new Promise(r=>setTimeout(r,2000));
+    }
+  } finally {
+    jobPolling = false;
+  }
+}
+
 runBtn.addEventListener('click', async () => {
   const url = $('url').value.trim();
   if (!url) return alert('Instagram URL을 입력해 주세요.');
@@ -188,13 +250,13 @@ runBtn.addEventListener('click', async () => {
   $('progressPanel').classList.remove('hidden');
   $('errorBox').classList.add('hidden');
 
-  setSimpleProgress('Instagram 댓글 수집 · AI 분석 · Google Sheets 저장',
-    '한 요청에서 전체 작업을 처리하고 있습니다. 댓글 수에 따라 시간이 걸릴 수 있습니다.', 35, '진행 중');
-  $('logs').textContent = '[작업 시작] Instagram Worker에서 댓글 수집 → OpenAI 분석 → Google Sheets 저장 순서로 처리합니다.\n' +
-    'Vercel 서버리스 작업 유실을 막기 위해 상태 폴링 없이 한 요청으로 처리합니다.';
+  setSimpleProgress('백그라운드 작업 시작',
+    '작업을 서버에 맡기고 있습니다. 이제 다른 앱을 열거나 화면을 꺼도 서버 작업은 계속됩니다.', 3, '시작 중');
+  $('logs').textContent = '[작업 시작] 서버 백그라운드 작업을 생성합니다.\n' +
+    '휴대폰 화면이 꺼지거나 Safari/Chrome이 백그라운드로 가도 댓글 수집 → AI 분석 → Google Sheets 저장은 서버에서 계속됩니다.';
 
   try {
-    const res = await fetch('/api/analyze', {
+    const res = await fetch('/api/job-start', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
@@ -205,20 +267,41 @@ runBtn.addEventListener('click', async () => {
         max_rounds: 120
       })
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || '분석에 실패했습니다.');
+    const data = await res.json().catch(()=>({}));
+    if (!res.ok) throw new Error(data.detail || '백그라운드 작업 시작에 실패했습니다.');
+    if (!data.job_id) throw new Error('작업 ID를 받지 못했습니다.');
 
-    setSimpleProgress('완료', `댓글 ${data.comments?.length || 0}개 처리 완료`, 100, '완료');
-    $('logs').textContent += `\n[완료] 댓글 ${data.comments?.length || 0}개 처리`;
-    if (data.sheet_saved !== undefined) $('logs').textContent += `\n[Google Sheets] 새로 저장 ${data.sheet_saved}개`;
-    render(data);
-    loadSystemStatus();
+    saveActiveJob(data.job_id);
+    $('logs').textContent += `\n[작업 ID] ${data.job_id}\n이제 이 페이지를 백그라운드로 보내도 됩니다.`;
+    void pollBackgroundJob(data.job_id);
   } catch (err) {
-    showFatal(err.message);
-  } finally {
     runBtn.disabled = false;
+    showFatal(err.message);
   }
 });
+
+// 모바일 브라우저는 백그라운드에서 JavaScript 타이머를 멈출 수 있다.
+// 서버 작업은 계속되고, 화면으로 돌아오는 순간 같은 job_id로 상태 확인을 재개한다.
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && currentJobId){
+    void pollBackgroundJob(currentJobId);
+  }
+});
+window.addEventListener('pageshow', () => {
+  if(currentJobId) void pollBackgroundJob(currentJobId);
+});
+window.addEventListener('online', () => {
+  if(currentJobId) void pollBackgroundJob(currentJobId);
+});
+
+// 탭을 닫았다가 다시 열어도 같은 브라우저라면 진행 중 작업을 복구한다.
+if(currentJobId){
+  runBtn.disabled = true;
+  $('progressPanel').classList.remove('hidden');
+  setSimpleProgress('기존 작업 복구', '서버에서 진행 중인 작업 상태를 다시 확인합니다.', 5, '확인 중');
+  $('logs').textContent = `[작업 복구] ${currentJobId}`;
+  void pollBackgroundJob(currentJobId);
+}
 
 function setSimpleProgress(stage, message, pct, state) {
   $('stage').textContent = stage;

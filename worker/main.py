@@ -5,13 +5,16 @@ import html
 import os
 import re
 import time
+import json
+import uuid
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
+import httpx
 
 app = FastAPI(title="Instagram Browser Worker")
 PROFILE_ROOT = Path(os.getenv("PROFILE_ROOT", "/data/profiles"))
@@ -26,6 +29,9 @@ sessions: Dict[str, Dict[str, Any]] = {}
 locks: Dict[str, asyncio.Lock] = {}
 op_locks: Dict[str, asyncio.Lock] = {}
 SESSION_IDLE_SECONDS = int(os.getenv("SESSION_IDLE_SECONDS", "1800"))
+JOB_ROOT = Path(os.getenv("JOB_ROOT", "/data/jobs"))
+JOB_ROOT.mkdir(parents=True, exist_ok=True)
+background_tasks: Set[asyncio.Task] = set()
 
 
 def valid_client_id(client_id: str) -> str:
@@ -162,6 +168,45 @@ class ScrapeReq(BaseModel):
     client_id: str
     url: str
     max_rounds: int = 120
+
+
+class BackgroundJobReq(BaseModel):
+    client_id: str
+    url: str
+    max_rounds: int = 120
+    analyze_ai: bool = True
+    save_sheet: bool = True
+    callback_url: str
+
+
+def job_path(job_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id or ""):
+        raise HTTPException(status_code=400, detail="잘못된 job_id")
+    return JOB_ROOT / f"{job_id}.json"
+
+
+def write_job(job_id: str, data: Dict[str, Any]):
+    path = job_path(job_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_job(job_id: str) -> Dict[str, Any]:
+    path = job_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def update_job(job_id: str, **changes):
+    try:
+        data = read_job(job_id)
+    except HTTPException:
+        return
+    data.update(changes)
+    data["updated_at"] = time.time()
+    write_job(job_id, data)
 
 
 @app.get("/health")
@@ -537,6 +582,102 @@ async def scrape(req: ScrapeReq, x_worker_key: Optional[str] = Header(default=No
                     await temp_pw.stop()
                 except Exception:
                     pass
+
+
+async def run_background_job(job_id: str, req: BackgroundJobReq):
+    try:
+        update_job(job_id, state="running", stage="Instagram 댓글 수집", message="서버에서 댓글을 수집하고 있습니다.", progress=10)
+        result = await scrape(
+            ScrapeReq(client_id=req.client_id, url=req.url, max_rounds=req.max_rounds),
+            x_worker_key=WORKER_API_KEY,
+            authorization=None,
+        )
+        comments = result.get("comments", [])
+        update_job(
+            job_id,
+            state="running",
+            stage="AI 분석 · Google Sheets 저장",
+            message=f"댓글 {len(comments)}개 수집 완료 · 서버 후처리 중",
+            progress=72,
+            count=len(comments),
+        )
+
+        headers = {"X-Worker-Key": WORKER_API_KEY} if WORKER_API_KEY else {}
+        payload = {
+            "job_id": job_id,
+            "url": req.url,
+            "comments": comments,
+            "analyze_ai": req.analyze_ai,
+            "save_sheet": req.save_sheet,
+        }
+        timeout = httpx.Timeout(300.0, connect=20.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(req.callback_url, json=payload, headers=headers)
+            try:
+                callback_result = response.json()
+            except Exception:
+                callback_result = {"detail": response.text[:1000]}
+            if response.status_code >= 400:
+                raise RuntimeError(callback_result.get("detail") or f"후처리 서버 오류 {response.status_code}")
+
+        update_job(
+            job_id,
+            state="done",
+            stage="완료",
+            message=f"댓글 {len(comments)}개 처리 완료",
+            progress=100,
+            result=callback_result,
+            error=None,
+        )
+    except Exception as e:
+        update_job(
+            job_id,
+            state="error",
+            stage="오류",
+            message="작업 중 오류가 발생했습니다.",
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
+@app.post("/jobs/start")
+async def background_job_start(
+    req: BackgroundJobReq,
+    x_worker_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    require_key(x_worker_key, authorization)
+    valid_client_id(req.client_id)
+    extract_shortcode(req.url)
+    if not req.callback_url.startswith("https://") and not req.callback_url.startswith("http://"):
+        raise HTTPException(status_code=400, detail="잘못된 callback_url")
+
+    job_id = uuid.uuid4().hex
+    write_job(job_id, {
+        "id": job_id,
+        "state": "queued",
+        "stage": "대기",
+        "message": "서버 작업을 준비하고 있습니다.",
+        "progress": 2,
+        "url": req.url,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "result": None,
+        "error": None,
+    })
+    task = asyncio.create_task(run_background_job(job_id, req))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/jobs/status")
+async def background_job_status(
+    job_id: str,
+    x_worker_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    require_key(x_worker_key, authorization)
+    return read_job(job_id)
 
 
 @app.on_event("startup")
