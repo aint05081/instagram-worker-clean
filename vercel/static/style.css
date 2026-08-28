@@ -5,3 +5,46 @@
 .login-link { cursor:pointer; font:inherit; }
 
 .url-input-wrap{position:relative;flex:1;min-width:0}.url-input-wrap input{width:100%;padding-right:48px}.clear-url{position:absolute;right:9px;top:50%;transform:translateY(-50%);width:32px;height:32px;border:0;background:transparent;color:#8b90a0;border-radius:50%;font-size:24px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}.clear-url:hover{background:#f0f1f4;color:#111827}.clear-url.hidden{display:none}@media(max-width:800px){.url-input-wrap{width:100%}.clear-url{right:8px;width:34px;height:34px;font-size:26px}}
+
+/* v10.3.1: keep the URL clear control inside the input on every viewport. */
+.input-row .url-input-wrap{position:relative;flex:1;min-width:0;margin:0}
+.input-row .url-input-wrap input{display:block;width:100%;padding-right:52px}
+.input-row .clear-url{
+  position:absolute !important;
+  right:10px !important;
+  top:50% !important;
+  transform:translateY(-50%) !important;
+  width:32px !important;
+  min-width:32px !important;
+  max-width:32px !important;
+  height:32px !important;
+  margin:0 !important;
+  padding:0 !important;
+  border:0 !important;
+  border-radius:50% !important;
+  background:transparent !important;
+  color:#8b90a0 !important;
+  font-size:24px !important;
+  font-weight:500 !important;
+  line-height:32px !important;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:3;
+}
+.input-row .clear-url.hidden{display:none !important}
+.input-row .clear-url:hover{background:#f0f1f4 !important;color:#111827 !important}
+@media(max-width:800px){
+  .input-row .url-input-wrap{width:100%}
+  .input-row .url-input-wrap input{padding-right:54px}
+  .input-row .clear-url{
+    right:9px !important;
+    width:34px !important;
+    min-width:34px !important;
+    max-width:34px !important;
+    height:34px !important;
+    margin:0 !important;
+    font-size:26px !important;
+    line-height:34px !important;
+  }
+}
